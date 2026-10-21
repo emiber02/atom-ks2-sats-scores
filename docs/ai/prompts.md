@@ -5,12 +5,19 @@
 Claude Code, Anthropic's agentic command-line coding tool, running locally on Windows.
 It had shell access to an authenticated Google Cloud SDK (`bq`) and web access for GOV.UK.
 
+## How I used AI
+
+I gave Claude Code the full take-home brief and asked it to build the solution as a new project.
+It profiled the data, built the first version of the models, materialised them in BigQuery, and
+wrote the first draft of the docs. I then reviewed the output. I questioned why only English and
+Maths were scored when the brief asks for every subject. That led to a second change: every
+subject now gets a row, labelled official, proxy or not_attainment, so proxy scores are never
+presented as real SATs results. I own the judgement calls listed in README §3 and will defend them myself.
+
 ## Prompt
 
-The full take-home brief was pasted into Claude Code, followed by one instruction in Lithuanian:
-
-> "PADARYK SIA UZDUOTI SUKURDAMAS NAUJA PROJEKTA SU TAM ATITINKMAU PAVADINIMU."
-> In English: "Do this task by creating a new project with an appropriate name."
+The first version was generated from the take-home brief. I pasted the brief into Claude Code
+with a one-line instruction to complete the task in a new, suitably named project.
 
 ## How the session ran
 
