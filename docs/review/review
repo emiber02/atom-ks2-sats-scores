@@ -1,0 +1,128 @@
+# Review notes: open questions, observations and improvements
+
+Notes from reviewing the KS2 SATs score model against the brief and the data. Some items repeat
+README §4 and §6 or the review session in `docs/ai/prompts.md`; items marked **(new)** appear here
+for the first time. Nothing in this file has been applied to the code yet.
+
+---
+
+## 1. Questions about the data
+
+These need an answer from the product or engineering team, not a modelling decision.
+
+| # | Question | Why it matters |
+|---|---|---|
+| 1 | Why do the same (session, question) pairs appear 2–5 times with identical timestamps but different `is_correct`? | 850 conflicting questions in official subjects. The tie rule moves scores by up to 4 points. Looks like a client retry or logging bug. |
+| 2 | Why does `responses.session_type` always say `MOCK_TEST` when the sitting says `summative_assessment`? | Currently ignored. If it is a hard-coded default, it should be fixed or dropped at source. |
+| 3 | What are the 56 sessions with responses but no sitting record? | 1,146 official-subject questions are excluded. If these are real assessments, pupils lose evidence. |
+| 4 | What does `is_correct` mean on Wellbeing survey answers (about 61% true)? | Possibly a "positive answer" code. It must never be read as attainment. |
+| 5 | Are Screeners timed? Their no-attempt rate is 11.8%, about three times other subjects. | If unreached questions count as wrong, Screener scores are biased down. |
+| 6 | Are assessments pitched at the pupil's year group? | The whole model assumes "53% on a Year 3 test" means "on track for 100". Average percent correct is flat across Years 1–6, which supports it, but it is not confirmed. |
+| 7 | Why do 6 pupils have two different year groups in one academic year (e.g. Year 1 and Year 3)? | Could be data entry, a school move, or an assessment assigned to the wrong year. |
+| 8 | Science has questions in the hierarchy but no responses. Is that expected? | Every pupil gets `no_evidence` for Science today. |
+| 9 | Can the hierarchy expose topic names? | Without them English Reading and GPS can't be separated, so English uses an averaged curve. |
+| 10 | Can raw tables get `created_at` / `updated_at` / ingestion timestamps? | Needed for true "what did the dashboard show on date X" and for detecting changed or deleted sittings incrementally. |
+| 11 | How are deleted pupils handled downstream (e.g. GDPR erasure)? **(new)** | They are hidden in the as-of function, but their rows remain in the history table. |
+| 12 | Does `pupils` have a join or creation date? **(new)** | Without it, a pupil appears in as-of results for dates before they joined. |
+
+---
+
+## 2. Observations from the data
+
+- **Duplicates are the biggest data issue.** Conservative `LOGICAL_AND` was kept because it is the
+  only rule with no arbitrary tie-break. Difference from majority vote is at most 2 points.
+- **The "196 days late" answer does not exist.** The original profiling query compared answers with
+  `ANY_VALUE(finished_at)` across many sittings. The real maximum delay is 1 second. README and
+  `planning.md` still carry the wrong claim.
+- **Coverage is uneven.** 78 of 242 pupils have no responses at all. VR has 8 scored pupils, NVR 3.
+- **The cohort scores a little below national.** About 63% of scored English pupils and 55% in Maths
+  reach 100, against about three quarters nationally. Plausible for a mixed Year 1–6 group assessed
+  mid-year, but worth checking against real school results.
+- **Screeners behave like a general ability measure.** They correlate with English at 0.70 and Maths
+  at 0.65, about as strongly as English and Maths correlate with each other (0.65).
+- **The minimum-questions rule never applies today.** The smallest pooled total with the latest 3
+  sittings is 25 questions. It is a safeguard for the future, not an active filter.
+
+---
+
+## 3. Modelling: what to reconsider
+
+1. **Pool the latest 5 sittings instead of 3.** On this data, latest 5 predicts a pupil's next sitting
+   better (average error 3.33 vs 3.48) and moves less per new sitting (1.12 vs 1.48 points).
+   One-setting change: `ROLLING_SITTINGS=5`.
+2. **`meets_expected_standard` on proxy subjects is misleading.** **(new)** "Expected standard" is a
+   GOV.UK definition for real KS2 tests. Showing it for Non-Verbal Reasoning implies a standard that
+   does not exist. Set it to NULL for proxy subjects, or rename it for them.
+3. **An "English" SATs score does not exist nationally.** **(new)** KS2 reports Reading and GPS
+   separately. The combined English score is a construct, which should be stated in the app, or split
+   once topic names exist.
+4. **Pooling weights long tests more.** **(new)** A 50-question test counts five times as much as a
+   10-question quiz. Equal weight per sitting is an alternative worth testing.
+5. **The window can span year groups.** **(new)** A pupil moving from Year 3 to Year 4 can have both
+   years pooled. Probably fine if tests are pitched at year group, but consider resetting at the
+   start of each academic year.
+6. **Younger pupils get a KS2 label.** **(new)** A Year 1 pupil gets "meets expected standard", which
+   is really "on track". The app should phrase it as a trajectory, not a result.
+7. **No difficulty adjustment.** Percent correct assumes Atom questions are as hard as SATs questions.
+   The proper fix is calibration against real KS2 outcomes (item response models or equipercentile
+   linking), which needs schools to share actual SATs results.
+8. **No uncertainty.** A score from 25 questions and one from 150 look the same. Add a confidence band
+   or an evidence-strength label.
+9. **Proxy curve is a placeholder.** Calibrate VR and NVR against 11+ results, and Screeners against
+   KS2 outcomes, once that data exists.
+10. **Unattempted Screener questions.** If Screeners are timed, consider excluding unreached questions
+    instead of counting them wrong.
+
+---
+
+## 4. Engineering: what to improve
+
+1. **The incremental run still scans all of `responses`.** De-duplication happens in a view before the
+   date filter, and raw `responses` is not partitioned. Fix: partition raw on `DATE(answered_at)`,
+   cluster by `session_id`, and make de-duplication an incremental table.
+2. **Sitting changes are not detected.** **(new)** `touched_sessions` only looks at new answers. If a
+   sitting is later deleted, completed or corrected without a new answer, the incremental run misses
+   it. Needs `updated_at` on sittings or a periodic full refresh.
+3. **History is fully rebuilt each run.** Fine today (2,303 rows). At scale, rebuild only touched pupils.
+4. **The app table is replaced, not merged.** Use MERGE so the production database receives only
+   changed rows.
+5. **Past as-of answers can change.** Because history is rebuilt, a late answer changes "the score at
+   T". That answers "what was true at T", not "what did the dashboard show at T". The second needs
+   ingestion timestamps (bitemporal history).
+6. **Missing tests.**
+   - Curve anchors: Reading 28/50, GPS 35/70 and Maths 58/110 must map to 100. Today a wrong seed
+     year would pass.
+   - Coverage: every scoreable sitting must reach the history table.
+   - Docs: numbers quoted in the README are not tested. The 196-day error shows the risk.
+7. **App table details.** Rename `sats_subject` to `subject_code` (it now holds WELLBEING), store
+   `percent_correct` as fixed-precision, turn `score_status` and `mapping_type` into enums or CHECK
+   constraints, and let the loader add a load timestamp so the model stays idempotent.
+8. **Move to dbt.** The layout maps one-to-one onto dbt models: staging views, a seed, an incremental
+   model and marts. dbt adds schema tests, lineage and freshness checks.
+
+---
+
+## 5. Questions about the brief
+
+- **"Every subject".** Read first as every SATs subject, then revised to every Atom subject with a
+  `mapping_type` (official / proxy / not_attainment). Worth confirming which reading the product team
+  intended.
+- **Who sees proxy scores?** Teachers may read any 80–120 number as a SATs result. Decide whether the
+  app shows proxy scores, labels them, or hides them.
+- **How fresh must scores be?** Daily batch is assumed. Near real-time after each sitting would change
+  the incremental design.
+- **Which point in time matters?** "Score as it truly was at T" (built) or "score the teacher saw at T"
+  (needs ingestion timestamps).
+
+---
+
+## 6. Suggested order of work
+
+1. Fix the 196-day claim and the profiling query.
+2. Add the curve-anchor and sitting-coverage tests.
+3. Switch to the latest 5 sittings and rebuild.
+4. Set `meets_expected_standard` to NULL for proxy subjects.
+5. Raise questions 1, 3, 5 and 10 from §1 with engineering.
+6. Partition raw `responses` and make de-duplication incremental.
+7. Agree with product how proxy scores and younger pupils' scores are shown.
+8. Start calibration once real KS2 results are available from partner schools.
