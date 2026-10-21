@@ -8,6 +8,7 @@
 --     (recent enough to track progress, wide enough not to swing on one bad day).
 --   * percent correct -> KS2 scaled score via ref_ks2_percent_to_scaled_score.
 --   * Fewer than {{min_questions}} pooled questions -> no score (status 'insufficient_evidence').
+--   * mapping_type = not_attainment (surveys) -> never scored (status 'not_attainment').
 --
 -- Point-in-time: the score as it stood at time T is the row where
 --   valid_from <= T AND (valid_to > T OR valid_to IS NULL).
@@ -25,6 +26,7 @@ WITH scoreable_sittings AS (
   SELECT
     r.pupil_id,
     s.sats_subject,
+    s.mapping_type,
     r.session_id,
     r.available_at,
     r.year_group_at_sitting,
@@ -39,6 +41,7 @@ rolling AS (
   SELECT
     pupil_id,
     sats_subject,
+    mapping_type,
     available_at,
     session_id                      AS triggering_session_id,
     year_group_at_sitting           AS latest_year_group,
@@ -66,31 +69,47 @@ versioned AS (
     LEAD(available_at) OVER (PARTITION BY pupil_id, sats_subject ORDER BY available_at) AS valid_to,
     CAST(ROUND(1000 * SAFE_DIVIDE(questions_correct, questions_answered)) AS INT64) AS percent_tenths
   FROM rolling
+),
+
+with_status AS (
+  SELECT
+    v.*,
+    c.scaled_score,
+    c.scaled_score_unrounded,
+    c.conversion_source_year,
+    CASE
+      WHEN v.mapping_type = 'not_attainment'        THEN 'not_attainment'
+      WHEN v.questions_answered >= {{min_questions}} THEN 'scored'
+      ELSE 'insufficient_evidence'
+    END AS score_status
+  FROM versioned AS v
+  -- LEFT JOIN: not_attainment subjects have no curve.
+  LEFT JOIN `{{project}}.{{dataset}}.ref_ks2_percent_to_scaled_score` AS c
+    ON c.sats_subject = v.sats_subject
+   AND c.percent_tenths = v.percent_tenths
 )
 
 SELECT
-  TO_HEX(MD5(CONCAT(v.pupil_id, '|', v.sats_subject, '|', FORMAT_TIMESTAMP('%FT%H:%M:%E6S', v.valid_from))))
-                                                  AS score_history_id,
-  v.pupil_id,
-  v.sats_subject,
-  v.valid_from,
-  v.valid_to,
-  v.valid_to IS NULL                              AS is_current,
-  IF(v.questions_answered >= {{min_questions}}, c.scaled_score, NULL)           AS sats_score,
-  IF(v.questions_answered >= {{min_questions}}, c.scaled_score_unrounded, NULL) AS sats_score_unrounded,
-  IF(v.questions_answered >= {{min_questions}}, 'scored', 'insufficient_evidence') AS score_status,
-  IF(v.questions_answered >= {{min_questions}}, c.scaled_score >= 100, NULL)    AS meets_expected_standard,
-  IF(v.questions_answered >= {{min_questions}}, c.scaled_score >= 110, NULL)    AS working_at_higher_standard,
-  v.percent_tenths / 10                           AS percent_correct,
-  v.questions_answered,
-  v.questions_correct,
-  v.sittings_used,
-  v.contributing_session_ids,
-  v.triggering_session_id,
-  v.latest_year_group,
-  c.conversion_source_year,
-  '{{model_version}}'                             AS scoring_model_version
-FROM versioned AS v
-JOIN `{{project}}.{{dataset}}.ref_ks2_percent_to_scaled_score` AS c
-  ON c.sats_subject = v.sats_subject
- AND c.percent_tenths = v.percent_tenths;
+  TO_HEX(MD5(CONCAT(pupil_id, '|', sats_subject, '|', FORMAT_TIMESTAMP('%FT%H:%M:%E6S', valid_from))))
+                                                         AS score_history_id,
+  pupil_id,
+  sats_subject,
+  mapping_type,
+  valid_from,
+  valid_to,
+  valid_to IS NULL                                       AS is_current,
+  IF(score_status = 'scored', scaled_score, NULL)        AS sats_score,
+  IF(score_status = 'scored', scaled_score_unrounded, NULL) AS sats_score_unrounded,
+  score_status,
+  IF(score_status = 'scored', scaled_score >= 100, NULL) AS meets_expected_standard,
+  IF(score_status = 'scored', scaled_score >= 110, NULL) AS working_at_higher_standard,
+  percent_tenths / 10                                    AS percent_correct,
+  questions_answered,
+  questions_correct,
+  sittings_used,
+  contributing_session_ids,
+  triggering_session_id,
+  latest_year_group,
+  conversion_source_year,
+  '{{model_version}}'                                    AS scoring_model_version
+FROM with_status;

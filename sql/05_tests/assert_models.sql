@@ -48,15 +48,41 @@ ASSERT NOT EXISTS (
   SELECT 1 FROM `{{project}}.{{dataset}}.pupil_sats_scores`
   WHERE sats_score NOT BETWEEN 80 AND 120
      OR (score_status = 'scored') != (sats_score IS NOT NULL)
-     OR score_status NOT IN ('scored', 'insufficient_evidence', 'no_evidence')
+     OR score_status NOT IN ('scored', 'insufficient_evidence', 'no_evidence', 'not_attainment')
+     OR mapping_type NOT IN ('official', 'proxy', 'not_attainment')
 ) AS 'pupil_sats_scores: score outside 80-120 or inconsistent with score_status';
+
+-- Every subject in the course hierarchy is mapped, and every pupil has a row for each one
+ASSERT NOT EXISTS (
+  SELECT DISTINCT subject_id FROM `{{project}}.{{dataset}}.stg_course_hierarchy`
+  EXCEPT DISTINCT
+  SELECT subject_id FROM `{{project}}.{{dataset}}.ref_sats_subjects`
+) AS 'ref_sats_subjects: a subject in stg_course_hierarchy has no mapping';
 
 ASSERT (
   SELECT COUNT(*) FROM `{{project}}.{{dataset}}.pupil_sats_scores`
 ) = (
-  SELECT COUNT(*) * (SELECT COUNT(DISTINCT sats_subject) FROM `{{project}}.{{dataset}}.ref_sats_subjects`)
+  SELECT COUNT(*) * (SELECT COUNT(DISTINCT subject_id) FROM `{{project}}.{{dataset}}.stg_course_hierarchy`)
   FROM `{{project}}.{{dataset}}.stg_pupils` WHERE NOT is_deleted
-) AS 'pupil_sats_scores: expected one row per non-deleted pupil per SATs subject';
+) AS 'pupil_sats_scores: expected one row per non-deleted pupil per subject';
+
+-- not_attainment subjects are never scored
+ASSERT NOT EXISTS (
+  SELECT 1 FROM `{{project}}.{{dataset}}.pupil_sats_scores`
+  WHERE mapping_type = 'not_attainment'
+    AND (sats_score IS NOT NULL OR score_status != 'not_attainment'
+         OR meets_expected_standard IS NOT NULL OR working_at_higher_standard IS NOT NULL)
+) AS 'pupil_sats_scores: a not_attainment row has a score or a non-not_attainment status';
+
+-- Every scoreable (official or proxy) subject has a complete conversion curve
+ASSERT NOT EXISTS (
+  SELECT s.sats_subject
+  FROM `{{project}}.{{dataset}}.ref_sats_subjects` AS s
+  LEFT JOIN `{{project}}.{{dataset}}.ref_ks2_percent_to_scaled_score` AS c USING (sats_subject)
+  WHERE s.mapping_type != 'not_attainment'
+  GROUP BY s.sats_subject
+  HAVING COUNT(c.percent_tenths) != 1001
+) AS 'ref_ks2_percent_to_scaled_score: a scoreable subject is missing its curve';
 
 -- Conversion curve: monotonic non-decreasing and anchored to the published expected standard
 ASSERT NOT EXISTS (
@@ -75,5 +101,6 @@ ASSERT (
 -- Point-in-time consistency: before any data exists nobody has a score
 ASSERT NOT EXISTS (
   SELECT 1 FROM `{{project}}.{{dataset}}.tvf_pupil_sats_scores_as_of`(TIMESTAMP '2000-01-01')
-  WHERE score_status != 'no_evidence'
+  WHERE sats_score IS NOT NULL
+     OR score_status NOT IN ('no_evidence', 'not_attainment')
 ) AS 'tvf_pupil_sats_scores_as_of: scores exist before any data';

@@ -32,3 +32,42 @@ The full take-home brief was pasted into Claude Code, followed by one instructio
 
 The candidate owns the final review of the assumptions, which are the judgement calls in README §3.
 They also own pushing the repository to GitHub and sending the link.
+
+## Change 2: score every Atom subject
+
+### Prompt
+
+A follow-up prompt pointed out that the brief asks for "a SATs score for every pupil, in every
+subject", while only English and Maths were scored. It asked for every Atom subject to get a row,
+without passing off non-SATs subjects as official SATs results. The existing scoring logic had to
+stay; only the curve choice per subject could change. The prompt specified:
+
+- check the data per subject first: right/wrong answers, sitting types, pupil and sitting counts;
+- add a `mapping_type` to `ref_sats_subjects`: `official` for English and Maths, `proxy` for
+  attainment subjects with right/wrong answers (generic curve = average of the three official KS2
+  curves), and `not_attainment` for Wellbeing;
+- review the eligibility rule for proxy subjects;
+- carry `mapping_type` to the marts, and give not_attainment subjects NULL scores with
+  `score_status = 'not_attainment'`;
+- bump the model version, extend the tests, rebuild, and update the README.
+
+### What the data check found
+
+- Science has questions in the hierarchy but no responses at all.
+- Verbal Reasoning, Non-Verbal Reasoning and Screeners have real right and wrong answers. All their
+  sittings are complete, summative and fixed-question, so the eligibility rule needed no change.
+- Wellbeing sittings are surveys. `is_correct` is filled in for them anyway, but a survey has no
+  right answer, so Wellbeing stays not_attainment. This was added as a data-quality finding.
+
+### What changed
+
+- `ref_sats_subjects` covers all 7 subjects with `mapping_type`.
+- The history, the as-of function and the app table expose `mapping_type`. The status
+  `not_attainment` is enforced in both the history and the table function.
+- `MODEL_VERSION` went from `ks2-v1.0` to `ks2-v1.1`.
+- Three tests were added: every hierarchy subject is mapped, not_attainment rows never carry a
+  score, and every scoreable subject has a complete curve. The row-count test now covers all subjects.
+- One test failed on the first run. The "no scores before any data" test expected only
+  `no_evidence`, but Wellbeing rows are always `not_attainment`. The test was corrected to allow both.
+- Verification: all 15 tests passed, and two consecutive builds were identical. English and Maths
+  results were unchanged.

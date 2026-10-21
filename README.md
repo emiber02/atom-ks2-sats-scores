@@ -1,7 +1,9 @@
 # Atom Learning – KS2 SATs score model
 
-Produces a KS2 SATs-equivalent score (80–120) for every pupil in every SATs subject from
-Atom assessment responses. It is built in BigQuery as layered, re-runnable, point-in-time SQL models.
+Produces a KS2 SATs-style score (80–120) for every pupil in every Atom subject from Atom
+assessment responses. Each score is labelled official, proxy or not_attainment, so a proxy is
+never passed off as a real SATs result. It is built in BigQuery as layered, re-runnable,
+point-in-time SQL models.
 
 **Materialised in:** `atom-analytics-candidates.emilija_bernotaite`
 **Answer table:** `pupil_sats_scores` (current score)
@@ -29,7 +31,7 @@ REFERENCE                                                          fct_pupil_sat
 seeds/ks2_scaled_score_conversion.csv (GOV.UK 2025)                 (SCD2: valid_from / valid_to)
   └► ref_ks2_scaled_score_conversion                                             │
        └► ref_ks2_percent_to_scaled_score ───────────────────────────────────────┤
-ref_sats_subjects (English, Maths) ──────────────────────────────────────────────┤
+ref_sats_subjects (every subject + mapping_type) ────────────────────────────────┤
                                                                                  ▼
 pupils ───────────────► stg_pupils ─────────────────────────────► tvf_pupil_sats_scores_as_of(as_of)
                                                                                  │  evaluated at end of time
@@ -44,8 +46,8 @@ pupils ───────────────► stg_pupils ────�
 | staging | `stg_course_hierarchy` | question | view | Question → subject hierarchy. |
 | staging | `stg_pupils` | pupil | view | Pupil list with deleted flag. |
 | reference | `ref_ks2_scaled_score_conversion` | test × raw mark | table (seed) | Official 2025 GOV.UK raw→scaled tables, loaded verbatim. |
-| reference | `ref_sats_subjects` | Atom subject | table | Which Atom subjects have a SATs equivalent, and which KS2 tests they map to. |
-| reference | `ref_ks2_percent_to_scaled_score` | SATs subject × 0.1% | table | Percent correct → scaled-score curve. |
+| reference | `ref_sats_subjects` | Atom subject | table | Every Atom subject, its `mapping_type`, and which KS2 curves it uses. |
+| reference | `ref_ks2_percent_to_scaled_score` | subject × 0.1% | table | Percent correct → scaled-score curve, for official and proxy subjects. |
 | intermediate | `int_sitting_subject_results` | sitting × subject | partitioned, clustered table, incremental | Aggregated results per sitting plus a scoreable flag and exclusion reason. |
 | mart | `fct_pupil_sats_score_history` | pupil × subject × version | partitioned, clustered table | Slowly changing (type 2) history of every score. |
 | mart | `tvf_pupil_sats_scores_as_of(as_of)` | pupil × subject | table function | Point-in-time scores for any timestamp. |
@@ -63,35 +65,49 @@ pupils ───────────────► stg_pupils ────�
    real 2025 KS2 paper. For example, 60% in Maths is 66 of 110 marks.
 4. **Raw mark → scaled score.** Look up the official GOV.UK 2025 conversion table and
    linearly interpolate between adjacent marks. Round to an integer, as real SATs are.
-5. **English.** KS2 English is two papers: Reading out of 50 and Grammar, Punctuation & Spelling
-   out of 70. Atom's English subject covers both, and the hierarchy exposes no topic names to
-   separate them. The English curve is therefore the average of the two official curves.
+5. **Curve per subject.** The curve depends on `mapping_type` (see assumption 2).
+   - English uses the average of the official Reading (out of 50) and Grammar, Punctuation &
+     Spelling (out of 70) curves. The hierarchy has no topic names to separate them.
+   - Maths uses the official Maths curve (out of 110).
+   - Proxy subjects use the average of all three official curves.
+   - Wellbeing has no curve and is never scored.
 6. **Minimum evidence.** Fewer than 10 pooled questions gives `score_status = 'insufficient_evidence'`
-   and no score. A pupil with no scoreable sittings gets `no_evidence`. Every pupil still has a row
-   for every SATs subject.
+   and no score. A pupil with no scoreable sittings gets `no_evidence`. Wellbeing always gets
+   `not_attainment`. Every pupil has a row for every Atom subject.
 7. Flags `meets_expected_standard` (score of 100 or more) and `working_at_higher_standard`
-   (110 or more) follow GOV.UK's definitions.
+   (110 or more) follow GOV.UK's definitions. They are NULL for Wellbeing.
 
 Resulting curve anchors, checked against the published expected-standard thresholds:
 
-| % correct | English | Maths |
-|---|---|---|
-| 25% | 90 | 92 |
-| 50% | 99 | 99 |
-| 53% | 100 | 100 |
-| 70% | 106 | 104 |
-| 90% | 117 | 112 |
+| % correct | English | Maths | Proxy (generic KS2) |
+|---|---|---|---|
+| 25% | 90 | 92 | 91 |
+| 50% | 99 | 99 | 99 |
+| 53% | 100 | 100 | 100 |
+| 70% | 106 | 104 | 105 |
+| 90% | 117 | 112 | 115 |
 
 The pass marks for 100 match the published 2025 thresholds: Reading 28/50, GPS 35/70 and Maths 58/110.
 
 ### Current output
 
-| Subject | Scored pupils | No evidence | Median | Meeting expected (100+) | Higher standard (110+) |
-|---|---|---|---|---|---|
-| English | 153 | 89 | 101 | 96 | 16 |
-| Maths | 151 | 91 | 100 | 83 | 10 |
+242 pupils, one row per pupil per subject.
 
-Nationally in 2025, about three quarters of pupils met the expected standard in each test.
+| Subject | Mapping | Scored | No evidence | Median | Meeting expected (100+) | Higher standard (110+) |
+|---|---|---|---|---|---|---|
+| English | official | 153 | 89 | 101 | 96 | 16 |
+| Maths | official | 151 | 91 | 100 | 83 | 10 |
+| Screeners | proxy | 82 | 160 | 101 | 48 | 8 |
+| Verbal Reasoning | proxy | 8 | 234 | 93 | 2 | 0 |
+| Non-Verbal Reasoning | proxy | 3 | 239 | 104 | 3 | 0 |
+| Science | proxy | 0 | 242 | n/a | 0 | 0 |
+| Wellbeing | not_attainment | 0 | 0 | n/a | n/a | n/a |
+
+All 242 Wellbeing rows have status `not_attainment`. Science has questions in the hierarchy but no
+responses, so every pupil has `no_evidence`. Verbal and Non-Verbal Reasoning scores rest on very few
+pupils and should be read with care.
+
+Nationally in 2025, about three quarters of pupils met the expected standard in each official test.
 Our cohort lands somewhat lower, which is plausible for a mixed Year 1–6 population assessed mid-year.
 
 ---
@@ -121,20 +137,22 @@ scoreable sitting becomes available. `tvf_pupil_sats_scores_as_of(T)` returns th
 
 **Ready for the production database.** `pupil_sats_scores` is narrow and flat with no arrays.
 It is explicitly typed, uses `NOT NULL` where a value always exists, and declares
-`PRIMARY KEY (pupil_id, sats_subject)`. `score_status` is an enum-like column, and
-`scoring_model_version` lets the app know which rules produced a value. Arrays such as
+`PRIMARY KEY (pupil_id, sats_subject)`. `score_status` and `mapping_type` are enum-like columns.
+`mapping_type` lets the app label a proxy score as an estimate. `scoring_model_version` lets the
+app know which rules produced a value. The current version is `ks2-v1.1`. Arrays such as
 `contributing_session_ids` stay in the warehouse history table for explainability.
 
 **Extensible.** Scoring parameters are build variables: `ROLLING_SITTINGS`, `MIN_QUESTIONS`,
-`CONVERSION_YEAR` and `MODEL_VERSION`. A new year's GOV.UK table is a new seed load. A new SATs-like
-subject is one row in `ref_sats_subjects`. Staging and the sitting layer contain no SATs-specific
+`CONVERSION_YEAR` and `MODEL_VERSION`. A new year's GOV.UK table is a new seed load. A new subject
+is one row in `ref_sats_subjects`, and a test fails the build if a subject is left unmapped. Staging and the sitting layer contain no SATs-specific
 logic, so a colleague answering a different question can start from `int_sitting_subject_results`.
 
-**Tested.** `sql/05_tests/assert_models.sql` holds twelve `ASSERT` checks that run as the last build step.
+**Tested.** `sql/05_tests/assert_models.sql` holds fifteen `ASSERT` checks that run as the last build step.
 They cover unique keys at every grain and reconciliation of responses from staging to the sitting
 layer. They check one current history row per pupil and subject, with no empty intervals. They check
-scores lie within 80–120 and agree with their status, and that every pupil has one row per subject.
-They check the curve is monotonic and that no scores exist before any data.
+scores lie within 80–120 and agree with their status. They check every hierarchy subject is mapped,
+every pupil has one row per subject, and not_attainment rows never carry a score. They check every
+scoreable subject has a complete, monotonic curve, and that no scores exist before any data.
 
 ---
 
@@ -144,9 +162,20 @@ They check the curve is monotonic and that no scores exist before any data.
    assessment is treated as "on track for 100". The score reads as "KS2-equivalent if this performance
    continues", not as a literal Year 6 prediction. The data supports this. Average percent correct is
    roughly flat across Years 1–6, at 52–66%, which is what you expect if each test is pitched at its year.
-2. **Only English and Maths get SATs scores.** These are the only subjects with a KS2 scaled score.
-   Science is teacher-assessed. Verbal and Non-Verbal Reasoning are 11+ subjects. Screeners and
-   Wellbeing are not attainment measures. I read "every subject" as every SATs subject.
+2. **Every subject gets a row, labelled by `mapping_type`.** Only Maths, Reading and GPS have
+   official KS2 scaled scores. The brief asks for every subject, so each one is labelled honestly.
+   - **official:** English and Maths, on the published GOV.UK curves.
+   - **proxy:** Science, Verbal Reasoning, Non-Verbal Reasoning and Screeners. Their responses have
+     real right and wrong answers, but no SATs test exists for them. They use a generic KS2 curve,
+     the average of all three official curves. A proxy score means "a percentage on an Atom
+     assessment means roughly what it means on a typical KS2 paper". It is a SATs-style estimate,
+     flagged so the app can label it, not an official result. Science has no responses yet, so its
+     proxy mapping is unused for now.
+   - **not_attainment:** Wellbeing. Its sittings are surveys with no right answers. It is never scored.
+
+   All proxy sittings are complete, summative, fixed-question assessments, so the eligibility rule
+   needed no change. Wellbeing sittings fail it because their style is `survey`, which matches its
+   not_attainment mapping.
 3. **Percent correct maps proportionally to raw marks on the real paper.** This ignores differences in
    difficulty between Atom questions and SATs questions.
 4. **The latest 3 sittings** is a judgement call, balancing responsiveness against noise. It is a parameter.
@@ -172,8 +201,9 @@ Evidence for each point is in `sql/analysis/data_quality_profile.sql`.
 | 9 | Pupils recorded in two different year groups within one academic year, such as Year 1 and Year 3. | 6 pupils | Kept. `latest_year_group` is exposed. Worth raising with the product team. |
 | 10 | Sittings with no responses at all, including every `entrance_exam` and `mock_session`. | 79 sittings | No effect on scoring. |
 | 11 | Pupils with no responses at all. | 78 of 242 | They receive `no_evidence` rows. |
-| 12 | The hierarchy has IDs only, with no topic names. English Reading and GPS can't be separated. | n/a | English uses the averaged curve. See assumption 2 and item 5 of how a score is calculated. |
-| 13 | No `created_at`, `updated_at` or ingestion timestamps on any raw table. | n/a | Point-in-time works on event time, not ingestion time. Changes to sittings, such as deletions, can't be detected incrementally. Run a full refresh, or add change data capture. |
+| 12 | The hierarchy has IDs only, with no topic names. English Reading and GPS can't be separated. | n/a | English uses the averaged curve. See assumption 2 and step 5 of how a score is calculated. |
+| 13 | Wellbeing survey responses have `is_correct` filled in, about 61% true, although a survey has no right answer. | 4,032 answers | The meaning is unknown, perhaps a "positive answer" code. Ignored: Wellbeing is not_attainment. |
+| 14 | No `created_at`, `updated_at` or ingestion timestamps on any raw table. | n/a | Point-in-time works on event time, not ingestion time. Changes to sittings, such as deletions, can't be detected incrementally. Run a full refresh, or add change data capture. |
 
 ## 5. How to run
 
@@ -208,14 +238,16 @@ docs/ai/               AI planning notes and prompt log
 1. **Calibrate per assessment instead of assuming every test is pitched at its year.** Fit an item
    response model, or simple equipercentile linking, from Atom scores to real KS2 outcomes for pupils
    where we know both. That gives per-assessment and per-year-group conversions.
-2. **Weight English by component** once topic names let us split Reading from GPS.
-3. **Add uncertainty.** Expose a confidence band from the number of questions pooled, so teachers can
+2. **Calibrate proxy subjects separately** once real outcome data is available, such as 11+ results
+   for Verbal and Non-Verbal Reasoning. The generic KS2 curve is a placeholder, not a measured link.
+3. **Weight English by component** once topic names let us split Reading from GPS.
+4. **Add uncertainty.** Expose a confidence band from the number of questions pooled, so teachers can
    see that a score from 12 questions is less certain than one from 120.
-4. **Resolve the duplicate-answer issue at source** with the engineering team. Conflicting correctness
+5. **Resolve the duplicate-answer issue at source** with the engineering team. Conflicting correctness
    on identical timestamps looks like a client retry or event-logging bug.
-5. **Add ingestion timestamps or change data capture** to the raw tables, enabling true bitemporal
+6. **Add ingestion timestamps or change data capture** to the raw tables, enabling true bitemporal
    point-in-time ("what did the dashboard show on date X") and incremental handling of sitting updates.
-6. **Move to dbt** with schema tests and freshness checks, and orchestrate daily incremental runs.
+7. **Move to dbt** with schema tests and freshness checks, and orchestrate daily incremental runs.
 
 ---
 
@@ -256,5 +288,4 @@ evaluated on held-out cohorts. That is the baseline any more complex model must 
 Built with **Claude Code**, Anthropic's command-line coding agent, in a single session. Claude ran
 the profiling queries through the `bq` CLI, parsed the GOV.UK conversion tables, drafted the SQL and
 docs, and ran the build, tests and idempotency check against BigQuery. All design decisions are
-recorded in `docs/ai/planning.md`, and the prompt and workflow in `docs/ai/prompts.md`. Commits are
-co-authored to show which work was AI-assisted.
+recorded in `docs/ai/planning.md`, and the prompts and workflow in `docs/ai/prompts.md`.

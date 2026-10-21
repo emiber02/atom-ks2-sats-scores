@@ -84,3 +84,13 @@ has no topic names to split them. A dense 0.1% lookup table keeps the scoring jo
 
 These are listed in README §6: per-assessment calibration, splitting English by component,
 uncertainty bands, fixing duplicate events at source, ingestion timestamps, and dbt.
+
+## 7. Change 2: every subject, labelled by mapping_type
+
+- The brief's "every subject" was re-read literally. Rather than drop non-SATs subjects, each
+  subject gets a `mapping_type` so the app can label proxy scores as estimates.
+- The generic proxy curve is the equal-weight average of the Maths, Reading and GPS curves. It sits
+  between the two official curves: 53% maps to 100, and 90% maps to 115.
+- not_attainment is enforced in two places, the history and the table function. A survey sitting
+  that someday passes eligibility still can't produce a score.
+- The scoring logic is unchanged, so English and Maths output is identical to version 1.0.
