@@ -2,25 +2,6 @@
 
 ## How I used AI
 
-I gave Claude Code the take-home brief and asked it to build the solution as a new project. It
-profiled the data, built the first version of the models, materialised them in BigQuery and drafted
-the docs. I reviewed the output. I questioned why only English and Maths were scored when the brief
-asks for every subject, which led to the official / proxy / not_attainment mapping. I then ran the
-review session below to challenge the main design decisions against the data. I sent the ten questions
-together in one message. Claude answered them with read-only queries. I asked for no code changes in
-this session, so recommendations are recorded here but not yet applied.
-
-## Origin of the first version
-
-The first version was generated from the take-home brief. I pasted the brief into Claude Code with a
-one-line instruction to complete the task in a new, suitably named project.
-
-## Review session
-
-All numbers come from queries run against `atom-analytics-candidates` during this session. As a check,
-the analysis recomputed every current score from raw responses and matched `pupil_sats_scores` with
-0 mismatches out of 397 scored pupil-subject rows.
-
 ### 1. Understanding the data
 
 > Before we change anything, I want to understand the raw data myself. Profile the four tables in
